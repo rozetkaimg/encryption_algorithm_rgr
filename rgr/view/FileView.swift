@@ -16,8 +16,11 @@ struct FileTransferAndEncryptView: View {
     @State private var gostKeyHex: String = ""
     @State private var gostInitialIvHex: String = ""
     
+    @State private var permutationKeyString: String = ""
+
     private let rsaWrapper = RSAObjectiveCWrapper()
     private let gostWrapper = GOSTObjectiveCWrapper()
+    private let permutationWrapper = PermutationCipherObjectiveCWrapper()
     
     @State private var feedbackMessage: String = "Ожидание файла..."
     
@@ -130,6 +133,14 @@ struct FileTransferAndEncryptView: View {
                     TextField("ГОСТ IV (hex, 16 симв., опционально для шифр.)", text: $gostInitialIvHex)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                     Text("IV будет сгенерирован, если не указан при шифровании.\nДля расшифрования IV считывается из начала файла.")
+                        .font(.caption2).foregroundColor(.gray)
+                }
+                .padding(.horizontal)
+            } else if selectedAlgorithm == .fixedPermutation {
+                Group {
+                    TextField("Ключ перестановки (например, '2013')", text: $permutationKeyString)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    Text("Ключ - строка цифр 0..N-1 (без повторов), где N - длина ключа.")
                         .font(.caption2).foregroundColor(.gray)
                 }
                 .padding(.horizontal)
@@ -289,8 +300,14 @@ struct FileTransferAndEncryptView: View {
             else {
                 baseMessage = sourceFileURL == nil ? "ГОСТ ключ введен. Выберите файл." : "ГОСТ готово к обработке файла."
                 if gostInitialIvHex.isEmpty && sourceFileURL != nil {
-                     baseMessage += " IV будет сгенерирован."
+                      baseMessage += " IV будет сгенерирован."
                 }
+            }
+        case .fixedPermutation:
+            if permutationKeyString.isEmpty {
+                baseMessage = "Для Фиксированной Перестановки введите ключ (например, '201')."
+            } else {
+                baseMessage = sourceFileURL == nil ? "Ключ Перестановки введен. Выберите файл." : "Фиксированная Перестановка готова к обработке файла."
             }
         case .staticEncrypt:
             baseMessage = sourceFileURL == nil ? "Статический сдвиг. Выберите файл." : "Статический сдвиг готов к обработке файла."
@@ -471,6 +488,8 @@ struct FileTransferAndEncryptView: View {
             if gostKeyHex.isEmpty || gostKeyHex.count != GOST_KEY_SIZE_BYTES * 2 { return true }
             if !isDecrypting && !gostInitialIvHex.isEmpty && gostInitialIvHex.count != GOST_IV_SIZE_BYTES * 2 { return true }
             return false
+        case .fixedPermutation:
+            return permutationKeyString.isEmpty
         case .staticEncrypt:
             return false
         }
@@ -551,6 +570,8 @@ struct FileTransferAndEncryptView: View {
             pathExtension = "enc"
         } else if operation == "encrypted_gost" && pathExtension.isEmpty {
              pathExtension = "gst"
+        } else if operation == "encrypted_perm" && pathExtension.isEmpty {
+            pathExtension = "prm"
         }
 
 
@@ -565,7 +586,13 @@ struct FileTransferAndEncryptView: View {
         }
         
         cleanupTemporaryFile()
-        let tempOpName = selectedAlgorithm == .rsa ? "encrypted_rsa" : (selectedAlgorithm == .gost ? "encrypted_gost" : "encrypted_static")
+        let tempOpName: String
+        switch selectedAlgorithm {
+            case .rsa: tempOpName = "encrypted_rsa"
+            case .gost: tempOpName = "encrypted_gost"
+            case .fixedPermutation: tempOpName = "encrypted_perm"
+            case .staticEncrypt: tempOpName = "encrypted_static"
+        }
         let temporaryDestinationURL = createTemporaryURL(for: currentSourceURL, operation: tempOpName)
         
         self.feedbackMessage = "Шифрование файла '\(currentSourceURL.lastPathComponent)'..."
@@ -589,6 +616,21 @@ struct FileTransferAndEncryptView: View {
                     toOutputFile: temporaryDestinationURL.path,
                     keyHex: self.gostKeyHex,
                     initialIvHex: ivToUse
+                )
+            case .fixedPermutation:
+                guard !self.permutationKeyString.isEmpty else {
+                    operationResultMessage = "Error: Ключ для Фиксированной Перестановки не указан."
+                    DispatchQueue.main.async {
+                        self.isProcessing = false
+                        self.feedbackMessage = operationResultMessage
+                        currentSourceURL.stopAccessingSecurityScopedResourceIfNeeded()
+                    }
+                    return
+                }
+                operationResultMessage = self.permutationWrapper.encryptFilePermutation(
+                    currentSourceURL.path,
+                    toOutputFile: temporaryDestinationURL.path,
+                    keyString: self.permutationKeyString
                 )
             case .staticEncrypt:
                 do {
@@ -621,7 +663,13 @@ struct FileTransferAndEncryptView: View {
         }
         
         cleanupTemporaryFile()
-        let tempOpName = selectedAlgorithm == .rsa ? "decrypted_rsa" : (selectedAlgorithm == .gost ? "decrypted_gost" : "decrypted_static")
+        let tempOpName: String
+        switch selectedAlgorithm {
+            case .rsa: tempOpName = "decrypted_rsa"
+            case .gost: tempOpName = "decrypted_gost"
+            case .fixedPermutation: tempOpName = "decrypted_perm"
+            case .staticEncrypt: tempOpName = "decrypted_static"
+        }
         let temporaryDestinationURL = createTemporaryURL(for: currentSourceURL, operation: tempOpName)
 
         self.feedbackMessage = "Расшифрование файла '\(currentSourceURL.lastPathComponent)'..."
@@ -643,6 +691,21 @@ struct FileTransferAndEncryptView: View {
                     currentSourceURL.path,
                     toOutputFile: temporaryDestinationURL.path,
                     keyHex: self.gostKeyHex
+                )
+            case .fixedPermutation:
+                guard !self.permutationKeyString.isEmpty else {
+                    operationResultMessage = "Error: Ключ для Фиксированной Перестановки не указан."
+                     DispatchQueue.main.async {
+                        self.isProcessing = false
+                        self.feedbackMessage = operationResultMessage
+                        currentSourceURL.stopAccessingSecurityScopedResourceIfNeeded()
+                    }
+                    return
+                }
+                operationResultMessage = self.permutationWrapper.decryptFilePermutation(
+                    currentSourceURL.path,
+                    toOutputFile: temporaryDestinationURL.path,
+                    keyString: self.permutationKeyString
                 )
             case .staticEncrypt:
                 do {
@@ -679,7 +742,7 @@ struct FileTransferAndEncryptView: View {
         
         let fileNameParts = processedFileURL.deletingPathExtension().lastPathComponent.components(separatedBy: "_")
         var suggestedName = processedFileURL.lastPathComponent
-        if fileNameParts.count > 2 { // originalName_operation_uuid
+        if fileNameParts.count > 2 {
             let originalName = fileNameParts.dropLast(2).joined(separator: "_")
             suggestedName = originalName + "." + processedFileURL.pathExtension
         }
@@ -726,12 +789,6 @@ struct FileTransferAndEncryptView: View {
 
 extension URL {
     func stopAccessingSecurityScopedResourceIfNeeded() {
-        // For sandboxed apps, you might need to stop accessing security-scoped resources.
-        // This is a placeholder; actual implementation depends on how access was started.
-        // If you used `startAccessingSecurityScopedResource()`, you should balance it with `stopAccessingSecurityScopedResource()`.
-        // However, for file drops and NSOpenPanel, the system often manages this.
-        // If this URL was obtained via startAccessingSecurityScopedResource, uncomment:
-        // self.stopAccessingSecurityScopedResource()
     }
 }
 
@@ -752,4 +809,3 @@ struct FileTransferAndEncryptView_Previews: PreviewProvider {
         FileTransferAndEncryptView()
     }
 }
-

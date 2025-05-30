@@ -1,7 +1,5 @@
 import SwiftUI
 
-let GOST_KEY_SIZE_BYTES = 32
-let GOST_IV_SIZE_BYTES = 8
 
 struct TextEncryptDecryptView: View {
     @State private var inputText: String = ""
@@ -11,16 +9,18 @@ struct TextEncryptDecryptView: View {
     @State private var rsaDKey: String = ""
     @State private var generalEncryptionKey: String = ""
     @State private var gostInitialIvHex: String = ""
+    @State private var permutationKeyString: String = ""
 
     @State private var selectedAlgorithm: EncryptionAlgorithm = .rsa
     @State private var feedbackMessage: String = "Введите текст для обработки."
 
     private let rsaWrapper = RSAObjectiveCWrapper()
-    private let gostWrapper = GOSTObjectiveCWrapper() // Added GOST wrapper
+    private let gostWrapper = GOSTObjectiveCWrapper()
+    private let permutationWrapper = PermutationCipherObjectiveCWrapper()
 
     private var isKeyRequired: Bool {
         switch selectedAlgorithm {
-        case .rsa, .gost:
+        case .rsa, .gost, .fixedPermutation:
             return true
         case .staticEncrypt:
             return false
@@ -40,9 +40,8 @@ struct TextEncryptDecryptView: View {
     private var isGOSTIvProvidedOrCanBeGenerated: Bool {
         gostInitialIvHex.isEmpty || gostInitialIvHex.count == GOST_IV_SIZE_BYTES * 2
     }
-    private var isGOSTIvProvidedForDecryption: Bool {
-        true
-    }
+    private var isPermutationKeyProvided: Bool {
+        !permutationKeyString.isEmpty     }
 
 
     var body: some View {
@@ -104,8 +103,13 @@ struct TextEncryptDecryptView: View {
                     Text("Примечание: IV будет сгенерирован если не указан при шифровании.\nДля расшифрования IV извлекается из входных данных ('IV:Ciphertext').")
                          .font(.caption)
                          .foregroundColor(.gray)
+                } else if selectedAlgorithm == .fixedPermutation {
+                    TextField("Ключ перестановки (например, '201')", text: $permutationKeyString)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    Text("Ключ - строка цифр 0..N-1 без повторений,\nгде N - длина ключа (размер блока).")
+                        .font(.caption)
+                        .foregroundColor(.gray)
                 } else if selectedAlgorithm == .staticEncrypt {
-                    // No key fields for staticEncrypt
                 }
             }
             .padding(.vertical, 10)
@@ -148,7 +152,7 @@ struct TextEncryptDecryptView: View {
                     .background(Color.secondary.opacity(0.1))
                     .border(Color.gray.opacity(0.5), width: 1)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .textSelection(.enabled) // Allow copying from output
+                    .textSelection(.enabled)
             }
             
             if !feedbackMessage.isEmpty {
@@ -184,21 +188,23 @@ struct TextEncryptDecryptView: View {
         case .rsa:
             return !areRSAKeysProvided
         case .gost:
-            // Key must be provided and have correct length. IV can be empty or correct length.
             return !(isGOSTKeyProvided && isGOSTIvProvidedOrCanBeGenerated)
+        case .fixedPermutation:
+            return !isPermutationKeyProvided
         case .staticEncrypt:
             return false
         }
     }
 
     private func shouldDisableDecryptButton() -> Bool {
-        if inputText.isEmpty { return true } // InputText here is the ciphertext
+        if inputText.isEmpty { return true }
         switch selectedAlgorithm {
         case .rsa:
             return !areRSADecryptionKeysProvided
         case .gost:
-            // Key must be provided. Ciphertext (inputText) must contain IV.
             return !isGOSTKeyProvided || !inputText.contains(":")
+        case .fixedPermutation:
+            return !isPermutationKeyProvided
         case .staticEncrypt:
             return false
         }
@@ -228,6 +234,7 @@ struct TextEncryptDecryptView: View {
                         self.rsaDKey = ""
                     }
                 }
+                 self.updateFeedbackForAlgorithmChange()
             }
         }
     }
@@ -296,6 +303,12 @@ struct TextEncryptDecryptView: View {
             else {
                 feedbackMessage = gostMessages.joined(separator: " ")
             }
+        case .fixedPermutation:
+            if permutationKeyString.isEmpty {
+                feedbackMessage = "Для Фиксированной Перестановки введите ключ (например, '201')."
+            } else {
+                feedbackMessage = "Фиксированная Перестановка готова к обработке."
+            }
         case .staticEncrypt:
             feedbackMessage = "Для алгоритма «\(selectedAlgorithm.rawValue)» ключ не используется."
         }
@@ -320,7 +333,7 @@ struct TextEncryptDecryptView: View {
             feedbackMessage = "Ошибка: Исходный текст не может быть пустым."
             return
         }
-        outputText = "" 
+        outputText = ""
 
         switch selectedAlgorithm {
         case .staticEncrypt:
@@ -361,7 +374,6 @@ struct TextEncryptDecryptView: View {
 
             feedbackMessage = "ГОСТ шифрование..."
             DispatchQueue.global(qos: .userInitiated).async {
-                // Pass nil if gostInitialIvHex is empty, otherwise pass the value.
                 let ivToUse: String? = self.gostInitialIvHex.isEmpty ? nil : self.gostInitialIvHex
                 
                 let result = self.gostWrapper.encryptTextGOST(inputText,
@@ -376,6 +388,24 @@ struct TextEncryptDecryptView: View {
                     }
                 }
             }
+        case .fixedPermutation:
+            guard isPermutationKeyProvided else {
+                feedbackMessage = "Ошибка: Для Фиксированной Перестановки требуется ключ."
+                return
+            }
+            feedbackMessage = "Шифрование Фиксированной Перестановкой..."
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.permutationWrapper.encryptTextPermutation(self.inputText,
+                                                                  keyString: self.permutationKeyString)
+                DispatchQueue.main.async {
+                    self.outputText = result
+                    if result.starts(with: "Error:") {
+                        self.feedbackMessage = result
+                    } else {
+                        self.feedbackMessage = "Текст зашифрован Фиксированной Перестановкой. Результат в HEX."
+                    }
+                }
+            }
         }
     }
 
@@ -384,7 +414,7 @@ struct TextEncryptDecryptView: View {
             feedbackMessage = "Ошибка: Текст для дешифрования (в поле исходного текста) не может быть пустым."
             return
         }
-        outputText = "" // Clear previous output
+        outputText = ""
 
         switch selectedAlgorithm {
         case .staticEncrypt:
@@ -425,7 +455,7 @@ struct TextEncryptDecryptView: View {
 
             feedbackMessage = "ГОСТ дешифрование..."
             DispatchQueue.global(qos: .userInitiated).async {
-                let result = self.gostWrapper.decryptTextGOST(self.inputText, // inputText is combinedIVCiphertextHex
+                let result = self.gostWrapper.decryptTextGOST(self.inputText,
                                                               keyHex: self.generalEncryptionKey)
                 DispatchQueue.main.async {
                     self.outputText = result
@@ -436,9 +466,28 @@ struct TextEncryptDecryptView: View {
                     }
                 }
             }
+        case .fixedPermutation:
+            guard isPermutationKeyProvided else {
+                feedbackMessage = "Ошибка: Для дешифрования Фиксированной Перестановкой требуется ключ."
+                return
+            }
+            feedbackMessage = "Дешифрование Фиксированной Перестановкой..."
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.permutationWrapper.decryptTextPermutation(self.inputText,
+                                                                  keyString: self.permutationKeyString)
+                DispatchQueue.main.async {
+                    self.outputText = result
+                    if result.starts(with: "Error:") {
+                        self.feedbackMessage = result
+                    } else {
+                        self.feedbackMessage = "Текст расшифрован Фиксированной Перестановкой."
+                    }
+                }
+            }
         }
     }
 }
+
 struct TextEncryptDecryptView_Previews: PreviewProvider {
     static var previews: some View {
         TextEncryptDecryptView()

@@ -3,3 +3,4 @@
 //
 #import "RSAObjectiveCWrapper.h"
 #import "GOSTObjectiveCWrapper.h"
+#import "PermutationCipherObjectiveCWrapper.h"
