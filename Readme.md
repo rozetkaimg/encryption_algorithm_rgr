@@ -87,7 +87,7 @@ _Проект первого курса_
 
 1.  Клонируйте репозиторий:
     ```bash
-    git clone [URL_вашего_репозитория]
+    git clone https://github.com/rozetkaimg/encryption_algorithm_rgr
     ```
 2.  Откройте проект `rgr.xcodeproj` в Xcode.
 3.  Убедитесь, что у вас установлена библиотека Boost и пути к ней корректно настроены в проекте Xcode (Header Search Paths, Library Search Paths), если она не включена как часть проекта.
