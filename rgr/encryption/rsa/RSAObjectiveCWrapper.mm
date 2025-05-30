@@ -21,7 +21,6 @@ static NSString *StdStringToNSString(const std::string& stdString) {
     return [NSString stringWithUTF8String:stdString.c_str()];
 }
 
-// Вспомогательная функция для конвертации 16-ричного NSString в BigInt
 static BigInt HexNSStringToBigInt(NSString *hexNSString) {
     if (hexNSString == nil || [hexNSString length] == 0) {
         throw std::runtime_error("Hex string for BigInt is empty or nil");

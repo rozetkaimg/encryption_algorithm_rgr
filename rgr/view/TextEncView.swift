@@ -1,5 +1,8 @@
 import SwiftUI
 
+let GOST_KEY_SIZE_BYTES = 32
+let GOST_IV_SIZE_BYTES = 8
+
 struct TextEncryptDecryptView: View {
     @State private var inputText: String = ""
     @State private var outputText: String = ""
@@ -7,10 +10,13 @@ struct TextEncryptDecryptView: View {
     @State private var rsaEKey: String = ""
     @State private var rsaDKey: String = ""
     @State private var generalEncryptionKey: String = ""
+    @State private var gostInitialIvHex: String = ""
+
     @State private var selectedAlgorithm: EncryptionAlgorithm = .rsa
     @State private var feedbackMessage: String = "Введите текст для обработки."
 
     private let rsaWrapper = RSAObjectiveCWrapper()
+    private let gostWrapper = GOSTObjectiveCWrapper() // Added GOST wrapper
 
     private var isKeyRequired: Bool {
         switch selectedAlgorithm {
@@ -27,6 +33,17 @@ struct TextEncryptDecryptView: View {
     private var areRSADecryptionKeysProvided: Bool {
         !rsaNKey.isEmpty && !rsaDKey.isEmpty
     }
+
+    private var isGOSTKeyProvided: Bool {
+        !generalEncryptionKey.isEmpty && generalEncryptionKey.count == GOST_KEY_SIZE_BYTES * 2
+    }
+    private var isGOSTIvProvidedOrCanBeGenerated: Bool {
+        gostInitialIvHex.isEmpty || gostInitialIvHex.count == GOST_IV_SIZE_BYTES * 2
+    }
+    private var isGOSTIvProvidedForDecryption: Bool {
+        true
+    }
+
 
     var body: some View {
         VStack(spacing: 15) {
@@ -69,9 +86,26 @@ struct TextEncryptDecryptView: View {
                         .font(.caption)
                         .foregroundColor(.gray)
 
-                } else if isKeyRequired {
-                    SecureField("Ключ (для ГОСТ)", text: $generalEncryptionKey)
+                } else if selectedAlgorithm == .gost {
+                    HStack {
+                        Button("Сген. ГОСТ Ключ (256-бит)") {
+                            generateAndSetGOSTKey()
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Сген. ГОСТ IV (64-бит)") {
+                            generateAndSetGOSTIv()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    SecureField("Ключ ГОСТ (hex, 64 символа)", text: $generalEncryptionKey)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
+                    TextField("ГОСТ IV (hex, 16 симв., опционально для шифр.)", text: $gostInitialIvHex)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    Text("Примечание: IV будет сгенерирован если не указан при шифровании.\nДля расшифрования IV извлекается из входных данных ('IV:Ciphertext').")
+                         .font(.caption)
+                         .foregroundColor(.gray)
+                } else if selectedAlgorithm == .staticEncrypt {
+                    // No key fields for staticEncrypt
                 }
             }
             .padding(.vertical, 10)
@@ -114,7 +148,7 @@ struct TextEncryptDecryptView: View {
                     .background(Color.secondary.opacity(0.1))
                     .border(Color.gray.opacity(0.5), width: 1)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .disabled(true)
+                    .textSelection(.enabled) // Allow copying from output
             }
             
             if !feedbackMessage.isEmpty {
@@ -150,19 +184,21 @@ struct TextEncryptDecryptView: View {
         case .rsa:
             return !areRSAKeysProvided
         case .gost:
-            return generalEncryptionKey.isEmpty
+            // Key must be provided and have correct length. IV can be empty or correct length.
+            return !(isGOSTKeyProvided && isGOSTIvProvidedOrCanBeGenerated)
         case .staticEncrypt:
             return false
         }
     }
 
     private func shouldDisableDecryptButton() -> Bool {
-        if inputText.isEmpty { return true }
+        if inputText.isEmpty { return true } // InputText here is the ciphertext
         switch selectedAlgorithm {
         case .rsa:
             return !areRSADecryptionKeysProvided
         case .gost:
-            return generalEncryptionKey.isEmpty
+            // Key must be provided. Ciphertext (inputText) must contain IV.
+            return !isGOSTKeyProvided || !inputText.contains(":")
         case .staticEncrypt:
             return false
         }
@@ -186,7 +222,7 @@ struct TextEncryptDecryptView: View {
                         self.rsaDKey = components[2]
                         self.feedbackMessage = "RSA ключи (n, e, d) сгенерированы и установлены (hex)."
                     } else {
-                        self.feedbackMessage = "Ошибка: Неверный формат сгенерированных ключей."
+                        self.feedbackMessage = "Ошибка: Неверный формат сгенерированных RSA ключей."
                         self.rsaNKey = ""
                         self.rsaEKey = ""
                         self.rsaDKey = ""
@@ -196,19 +232,69 @@ struct TextEncryptDecryptView: View {
         }
     }
 
+    private func generateAndSetGOSTKey() {
+        feedbackMessage = "Генерация ГОСТ ключа..."
+        DispatchQueue.global(qos: .userInitiated).async {
+            let keyHex = gostWrapper.generateGOSTKeyHex()
+            DispatchQueue.main.async {
+                if keyHex.starts(with: "Error:") {
+                    self.feedbackMessage = keyHex
+                    self.generalEncryptionKey = ""
+                } else {
+                    self.generalEncryptionKey = keyHex
+                    self.feedbackMessage = "ГОСТ ключ (256-бит) сгенерирован и установлен (hex)."
+                }
+                updateFeedbackForAlgorithmChange()
+            }
+        }
+    }
+
+    private func generateAndSetGOSTIv() {
+        feedbackMessage = "Генерация ГОСТ IV..."
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ivHex = gostWrapper.generateGOSTIvHex()
+            DispatchQueue.main.async {
+                if ivHex.starts(with: "Error:") {
+                    self.feedbackMessage = ivHex
+                    self.gostInitialIvHex = ""
+                } else {
+                    self.gostInitialIvHex = ivHex
+                    self.feedbackMessage = "ГОСТ IV (64-бит) сгенерирован и установлен (hex)."
+                }
+                 updateFeedbackForAlgorithmChange()
+            }
+        }
+    }
+
     private func updateFeedbackForAlgorithmChange() {
         switch selectedAlgorithm {
         case .rsa:
             if !areRSAKeysProvided {
-                feedbackMessage = "Для RSA сгенерируйте или введите компоненты ключа (N, E)."
-            } else {
+                feedbackMessage = "Для RSA сгенерируйте или введите компоненты ключа (N, E для шифр., N, D для дешифр.)."
+            } else if !areRSADecryptionKeysProvided && areRSAKeysProvided {
+                 feedbackMessage = "RSA: Ключи N и E указаны (для шифрования). Для дешифрования также нужен ключ D."
+            }
+            else {
                 feedbackMessage = "RSA готово к обработке."
             }
         case .gost:
-            if generalEncryptionKey.isEmpty {
-                feedbackMessage = "Для алгоритма «\(selectedAlgorithm.rawValue)» требуется ключ."
-            } else {
+            var gostMessages: [String] = []
+            if !isGOSTKeyProvided {
+                gostMessages.append("Требуется ГОСТ ключ (64 hex символа).")
+            }
+            if gostInitialIvHex.isEmpty {
+                 gostMessages.append("IV для шифрования будет сгенерирован автоматически.")
+            } else if gostInitialIvHex.count != GOST_IV_SIZE_BYTES * 2 {
+                gostMessages.append("ГОСТ IV должен быть \(GOST_IV_SIZE_BYTES*2) hex символов или пуст (для автогенерации).")
+            }
+
+            if gostMessages.isEmpty && isGOSTKeyProvided {
                 feedbackMessage = "ГОСТ готово к обработке."
+            } else if !isGOSTKeyProvided {
+                 feedbackMessage = "Для ГОСТ требуется ключ (64 hex символа)."
+            }
+            else {
+                feedbackMessage = gostMessages.joined(separator: " ")
             }
         case .staticEncrypt:
             feedbackMessage = "Для алгоритма «\(selectedAlgorithm.rawValue)» ключ не используется."
@@ -216,12 +302,14 @@ struct TextEncryptDecryptView: View {
     }
 
     private func determineFeedbackColor() -> Color {
-        if feedbackMessage.lowercased().contains("ошибка") || feedbackMessage.lowercased().contains("требуется") {
+        let lowercasedFeedback = feedbackMessage.lowercased()
+        if lowercasedFeedback.contains("ошибка") || lowercasedFeedback.contains("требуется") || lowercasedFeedback.contains("должен быть") {
             return .red
-        } else if feedbackMessage.lowercased().contains("успешно") ||
-                    feedbackMessage.lowercased().contains("готово") ||
-                    feedbackMessage.lowercased().contains("сгенерированы") ||
-                    feedbackMessage.lowercased().contains("скопирован") {
+        } else if lowercasedFeedback.contains("успешно") ||
+                  lowercasedFeedback.contains("готово") ||
+                  lowercasedFeedback.contains("сгенерированы") ||
+                  lowercasedFeedback.contains("сгенерирован") ||
+                  lowercasedFeedback.contains("скопирован") {
             return .green
         }
         return .orange
@@ -232,6 +320,7 @@ struct TextEncryptDecryptView: View {
             feedbackMessage = "Ошибка: Исходный текст не может быть пустым."
             return
         }
+        outputText = "" 
 
         switch selectedAlgorithm {
         case .staticEncrypt:
@@ -261,16 +350,32 @@ struct TextEncryptDecryptView: View {
                 }
             }
         case .gost:
-            guard !generalEncryptionKey.isEmpty else {
-                feedbackMessage = "Ошибка: Для ГОСТ требуется ключ."
+            guard isGOSTKeyProvided else {
+                feedbackMessage = "Ошибка: Для ГОСТ требуется ключ (64 hex символа)."
                 return
             }
-            let prefix = "GOST_ENC(KEY:\(String(repeating: "*", count: generalEncryptionKey.count))): \n"
-            let transformedScalars = inputText.unicodeScalars.map {
-                UnicodeScalar($0.value + UInt32(generalEncryptionKey.count % 5 + 1)) ?? $0
+            if !gostInitialIvHex.isEmpty && gostInitialIvHex.count != GOST_IV_SIZE_BYTES * 2 {
+                feedbackMessage = "Ошибка: ГОСТ IV должен быть \(GOST_IV_SIZE_BYTES*2) hex символов или пуст."
+                return
             }
-            outputText = prefix + String(String.UnicodeScalarView(transformedScalars))
-            feedbackMessage = "Текст «зашифрован» ГОСТ 28147-89 (имитация)."
+
+            feedbackMessage = "ГОСТ шифрование..."
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Pass nil if gostInitialIvHex is empty, otherwise pass the value.
+                let ivToUse: String? = self.gostInitialIvHex.isEmpty ? nil : self.gostInitialIvHex
+                
+                let result = self.gostWrapper.encryptTextGOST(inputText,
+                                                              keyHex: self.generalEncryptionKey,
+                                                              initialIvHex: ivToUse)
+                DispatchQueue.main.async {
+                    self.outputText = result
+                    if result.starts(with: "Error:") {
+                        self.feedbackMessage = result
+                    } else {
+                        self.feedbackMessage = "Текст зашифрован ГОСТ. Результат в формате 'IV_hex:Ciphertext_hex'."
+                    }
+                }
+            }
         }
     }
 
@@ -279,6 +384,7 @@ struct TextEncryptDecryptView: View {
             feedbackMessage = "Ошибка: Текст для дешифрования (в поле исходного текста) не может быть пустым."
             return
         }
+        outputText = "" // Clear previous output
 
         switch selectedAlgorithm {
         case .staticEncrypt:
@@ -308,28 +414,31 @@ struct TextEncryptDecryptView: View {
                 }
             }
         case .gost:
-            guard !generalEncryptionKey.isEmpty else {
-                feedbackMessage = "Ошибка: Для ГОСТ требуется ключ."
+            guard isGOSTKeyProvided else {
+                feedbackMessage = "Ошибка: Для дешифрования ГОСТ требуется ключ (64 hex символа)."
                 return
             }
-            let prefix = "GOST_ENC(KEY:\(String(repeating: "*", count: generalEncryptionKey.count))): \n"
-            if inputText.hasPrefix(prefix) {
-                let relevantText = String(inputText.dropFirst(prefix.count))
-                let transformedScalars = relevantText.unicodeScalars.map {
-                    UnicodeScalar($0.value - UInt32(generalEncryptionKey.count % 5 + 1)) ?? $0
+            guard inputText.contains(":") else {
+                feedbackMessage = "Ошибка: Неверный формат для дешифрования ГОСТ. Ожидается 'IV_hex:Ciphertext_hex'."
+                return
+            }
+
+            feedbackMessage = "ГОСТ дешифрование..."
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.gostWrapper.decryptTextGOST(self.inputText, // inputText is combinedIVCiphertextHex
+                                                              keyHex: self.generalEncryptionKey)
+                DispatchQueue.main.async {
+                    self.outputText = result
+                    if result.starts(with: "Error:") {
+                        self.feedbackMessage = result
+                    } else {
+                        self.feedbackMessage = "Текст расшифрован ГОСТ."
+                    }
                 }
-                outputText = String(String.UnicodeScalarView(transformedScalars))
-                feedbackMessage = "Текст «расшифрован» ГОСТ 28147-89 (имитация)."
-            } else {
-                outputText = ""
-                feedbackMessage = "Ошибка: Неверный формат для дешифрования ГОСТ (имитация)."
             }
         }
     }
 }
-
-
-
 struct TextEncryptDecryptView_Previews: PreviewProvider {
     static var previews: some View {
         TextEncryptDecryptView()

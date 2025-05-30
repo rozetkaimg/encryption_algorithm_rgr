@@ -269,24 +269,19 @@ bool decryptFile(const std::string& inputFilePath, const std::string& outputFile
         lineNumber++;
 
         std::string processed_line = original_hex_line;
-
-        // 1. Тщательная очистка строки от начальных/конечных пробелов
         processed_line.erase(0, processed_line.find_first_not_of(" \t\n\r\f\v"));
         processed_line.erase(processed_line.find_last_not_of(" \t\n\r\f\v") + 1);
-
-        // 2. Удаляем квадратные скобки, если они обрамляют строку
         if (!processed_line.empty() && processed_line.front() == '[' && processed_line.back() == ']') {
             if (processed_line.length() >= 2) {
                  processed_line = processed_line.substr(1, processed_line.length() - 2);
-            } else { // Строка была "[]", "[", или "]"
+            } else {
                  processed_line.clear();
             }
-            // Повторная обрезка на случай, если внутри скобок были пробелы по краям
             processed_line.erase(0, processed_line.find_first_not_of(" \t\n\r\f\v"));
             processed_line.erase(processed_line.find_last_not_of(" \t\n\r\f\v") + 1);
         }
 
-        if (processed_line.empty()) { // Если строка стала пустой после очистки, пропускаем
+        if (processed_line.empty()) {
             continue;
         }
         hadProcessableLines = true;
@@ -294,19 +289,8 @@ bool decryptFile(const std::string& inputFilePath, const std::string& outputFile
         std::istringstream iss(processed_line);
         BigInt encrypted_block_val;
         iss >> std::hex >> encrypted_block_val;
-
-        // Строгая проверка:
-        // 1. iss.fail() будет true, если формат HEX нарушен.
-        // 2. !iss.eof() будет true, если после успешного чтения числа в строке остались еще какие-то символы.
-        //    Мы ожидаем, что вся processed_line будет валидным HEX и будет полностью считана.
         if (iss.fail() || !iss.eof()) {
             std::cerr << "Line " << lineNumber << ": Error parsing hex string or trailing data. Original: [" << original_hex_line << "], Processed for parsing: [" << processed_line << "]" << std::endl;
-            // Для детальной отладки можно раскомментировать:
-            // std::cerr << "    Stream state: good=" << iss.good() << ", eof=" << iss.eof() << ", fail=" << iss.fail() << ", bad=" << iss.bad();
-            // if (!iss.fail() && !iss.eof()) {
-            //     std::cerr << ", peek char ASCII: " << static_cast<int>(iss.peek());
-            // }
-            // std::cerr << std::endl;
             continue;
         }
         encrypted_blocks.push_back(encrypted_block_val);
@@ -327,36 +311,31 @@ bool decryptFile(const std::string& inputFilePath, const std::string& outputFile
         if (!decrypted_bytes.empty()) {
              all_decrypted_bytes.insert(all_decrypted_bytes.end(), decrypted_bytes.begin(), decrypted_bytes.end());
              SucceededAtLeastOnce = true;
-        } else if (block_size_data > 0) { // Только если ожидались непустые данные
-             // Можно добавить предупреждение, если блок данных ожидался, но дешифровался в пустой вектор.
-             // std::cerr << "Warning: Decryption of block " << i+1 << " (hex: " << encrypted_blocks[i] << ") resulted in empty data when " << block_size_data << " bytes were expected." << std::endl;
+        } else if (block_size_data > 0) {
+       
         }
     }
 
-    // --- Начало эвристического удаления паддинга (заполнения) ---
-    // Эта логика пытается удалить нулевые байты, которые могли быть добавлены как паддинг
-    // к последнему блоку данных. Она не идеальна.
-    if (!all_decrypted_bytes.empty() && !encrypted_blocks.empty()) { // Только если есть что удалять
+    if (!all_decrypted_bytes.empty() && !encrypted_blocks.empty()) {
         size_t first_zero_in_potential_padding = std::string::npos;
-        // Ищем с конца, но не раньше начала последнего блока данных
         size_t start_search_index = (all_decrypted_bytes.size() > block_size_data) ? (all_decrypted_bytes.size() - block_size_data) : 0;
 
         for (size_t i = all_decrypted_bytes.size(); i > start_search_index; --i) {
             if (all_decrypted_bytes[i-1] == 0) {
                 bool all_zeros_before_this = true;
-                for (size_t j = i-1; j > start_search_index; --j) { // Проверяем, все ли нули до этой позиции в пределах последнего блока
+                for (size_t j = i-1; j > start_search_index; --j) {
                      if(all_decrypted_bytes[j-1] != 0) {
                         all_zeros_before_this = false;
                         break;
                      }
                 }
-                 if (all_zeros_before_this) { // Если это начало последовательности нулей в конце
+                 if (all_zeros_before_this) {
                     first_zero_in_potential_padding = i-1;
-                 } else { // Наткнулись на не-ноль, значит, последовательность нулей (если была) закончилась
+                 } else {
                     break;
                  }
 
-            } else { // Наткнулись на не-ноль, значит, паддинга нет (или он уже закончился)
+            } else {
                 break;
             }
         }
@@ -365,7 +344,6 @@ bool decryptFile(const std::string& inputFilePath, const std::string& outputFile
             all_decrypted_bytes.resize(first_zero_in_potential_padding);
         }
     }
-    // --- Конец эвристического удаления паддинга ---
 
 
     if (!all_decrypted_bytes.empty()) {

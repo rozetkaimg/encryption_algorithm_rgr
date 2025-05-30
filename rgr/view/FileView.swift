@@ -13,7 +13,11 @@ struct FileTransferAndEncryptView: View {
     @State private var rsaEKey: String = ""
     @State private var rsaDKey: String = ""
     
+    @State private var gostKeyHex: String = ""
+    @State private var gostInitialIvHex: String = ""
+    
     private let rsaWrapper = RSAObjectiveCWrapper()
+    private let gostWrapper = GOSTObjectiveCWrapper()
     
     @State private var feedbackMessage: String = "Ожидание файла..."
     
@@ -55,7 +59,7 @@ struct FileTransferAndEncryptView: View {
             }
         }
         .padding()
-        .frame(minWidth: 650, idealWidth: 700, minHeight: 600, idealHeight: 650)
+        .frame(minWidth: 650, idealWidth: 700, minHeight: 650, idealHeight: 700)
         .onAppear(perform: updateFeedbackForAlgorithmChange)
         .onDisappear(perform: cleanupTemporaryFile)
     }
@@ -110,9 +114,25 @@ struct FileTransferAndEncryptView: View {
                 }
                 .padding(.horizontal)
             } else if selectedAlgorithm == .gost {
-                SecureField("Ключ (для ГОСТ)", text: $rsaDKey)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .padding(.horizontal)
+                Group {
+                    HStack {
+                        Button("Сген. ГОСТ Ключ (256-бит)") {
+                            generateAndSetGOSTKey()
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Сген. ГОСТ IV (64-бит)") {
+                            generateAndSetGOSTIv()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    SecureField("Ключ ГОСТ (hex, 64 симв.)", text: $gostKeyHex)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    TextField("ГОСТ IV (hex, 16 симв., опционально для шифр.)", text: $gostInitialIvHex)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    Text("IV будет сгенерирован, если не указан при шифровании.\nДля расшифрования IV считывается из начала файла.")
+                        .font(.caption2).foregroundColor(.gray)
+                }
+                .padding(.horizontal)
             }
             
             HStack(spacing: 15) {
@@ -240,34 +260,49 @@ struct FileTransferAndEncryptView: View {
     }
     
     private func determineFeedbackColor() -> Color {
-        if feedbackMessage.lowercased().contains("ошибка") || feedbackMessage.lowercased().contains("не выбран") || feedbackMessage.lowercased().contains("отменен") {
+        let lowercasedFeedback = feedbackMessage.lowercased()
+        if lowercasedFeedback.contains("ошибка") || lowercasedFeedback.contains("не выбран") || lowercasedFeedback.contains("отменен") || lowercasedFeedback.contains("требуется") || lowercasedFeedback.contains("неверный") || lowercasedFeedback.contains("не найден"){
             return .red
-        } else if feedbackMessage.lowercased().contains("успешно сохранен") || feedbackMessage.lowercased().contains("успешно зашифрован") || feedbackMessage.lowercased().contains("успешно расшифрован") || feedbackMessage.lowercased().contains("готов к сохранению") {
+        } else if lowercasedFeedback.contains("успешно") || lowercasedFeedback.contains("готов к сохранению") {
             return .green
-        } else if feedbackMessage.lowercased().contains("готов к обработке") {
+        } else if lowercasedFeedback.contains("готов к обработке") || lowercasedFeedback.contains("ключи введены") || lowercasedFeedback.contains("ключи сгенерированы") || lowercasedFeedback.contains("ключ сгенерирован") || lowercasedFeedback.contains("iv сгенерирован") {
             return .blue
         }
         return .orange
     }
     
     private func updateFeedbackForAlgorithmChange() {
+        var baseMessage = ""
         switch selectedAlgorithm {
         case .rsa:
             if rsaNKey.isEmpty || rsaEKey.isEmpty {
-                feedbackMessage = "Для RSA сгенерируйте или введите ключи N и E (и D для расшифрования)."
+                baseMessage = "Для RSA сгенерируйте или введите ключи N и E (и D для расшифрования)."
             } else {
-                feedbackMessage = sourceFileURL == nil ? "RSA ключи введены. Выберите файл." : "RSA готово к обработке файла."
+                baseMessage = sourceFileURL == nil ? "RSA ключи введены. Выберите файл." : "RSA готово к обработке файла."
             }
         case .gost:
-            feedbackMessage = sourceFileURL == nil ? "ГОСТ. Введите ключ и выберите файл." : "ГОСТ (имитация) готов к обработке файла."
+            if gostKeyHex.isEmpty || gostKeyHex.count != GOST_KEY_SIZE_BYTES * 2 {
+                baseMessage = "Для ГОСТ введите или сгенерируйте ключ (\(GOST_KEY_SIZE_BYTES * 2) hex симв.)."
+            } else if !gostInitialIvHex.isEmpty && gostInitialIvHex.count != GOST_IV_SIZE_BYTES * 2 {
+                 baseMessage = "ГОСТ IV должен быть \(GOST_IV_SIZE_BYTES*2) hex символов или пуст (для автогенерации)."
+            }
+            else {
+                baseMessage = sourceFileURL == nil ? "ГОСТ ключ введен. Выберите файл." : "ГОСТ готово к обработке файла."
+                if gostInitialIvHex.isEmpty && sourceFileURL != nil {
+                     baseMessage += " IV будет сгенерирован."
+                }
+            }
         case .staticEncrypt:
-            feedbackMessage = sourceFileURL == nil ? "Статический сдвиг. Выберите файл." : "Статический сдвиг готов к обработке файла."
+            baseMessage = sourceFileURL == nil ? "Статический сдвиг. Выберите файл." : "Статический сдвиг готов к обработке файла."
         }
-         if sourceFileURL != nil && outputProcessedURL == nil {
-             feedbackMessage += " Нажмите Зашифровать/Расшифровать."
-         } else if outputProcessedURL != nil {
-             feedbackMessage = "Файл обработан и готов к сохранению."
-         }
+        
+        if sourceFileURL != nil && outputProcessedURL == nil && !isProcessing {
+            feedbackMessage = baseMessage + " Нажмите Зашифровать/Расшифровать."
+        } else if outputProcessedURL != nil && !isProcessing {
+            feedbackMessage = "Файл обработан и готов к сохранению."
+        } else if !isProcessing {
+            feedbackMessage = baseMessage
+        }
     }
     
     private func cleanupTemporaryFile() {
@@ -313,13 +348,13 @@ struct FileTransferAndEncryptView: View {
                 self.sourceFileURL = nil
             } else {
                 self.sourceFileURL = url
-                self.feedbackMessage = "Файл '\(url.lastPathComponent)' готов к обработке. "
+                self.feedbackMessage = "Файл '\(url.lastPathComponent)' выбран. "
                 updateFeedbackForAlgorithmChange()
             }
         } else {
             if url.startAccessingSecurityScopedResource() {
                 self.sourceFileURL = url
-                self.feedbackMessage = "Файл '\(url.lastPathComponent)' готов к обработке (доступ получен). "
+                self.feedbackMessage = "Файл '\(url.lastPathComponent)' выбран (доступ получен). "
                 updateFeedbackForAlgorithmChange()
             } else {
                 self.sourceFileURL = nil
@@ -433,7 +468,9 @@ struct FileTransferAndEncryptView: View {
             if rsaNKey.isEmpty { return true }
             return isDecrypting ? rsaDKey.isEmpty : rsaEKey.isEmpty
         case .gost:
-            return rsaDKey.isEmpty
+            if gostKeyHex.isEmpty || gostKeyHex.count != GOST_KEY_SIZE_BYTES * 2 { return true }
+            if !isDecrypting && !gostInitialIvHex.isEmpty && gostInitialIvHex.count != GOST_IV_SIZE_BYTES * 2 { return true }
+            return false
         case .staticEncrypt:
             return false
         }
@@ -458,10 +495,48 @@ struct FileTransferAndEncryptView: View {
                         self.feedbackMessage = "RSA ключи сгенерированы. "
                         self.updateFeedbackForAlgorithmChange()
                     } else {
-                        self.feedbackMessage = "Ошибка: Неверный формат сгенерированных ключей."
+                        self.feedbackMessage = "Ошибка: Неверный формат сгенерированных RSA ключей."
                         self.rsaNKey = ""; self.rsaEKey = ""; self.rsaDKey = ""
                     }
                 }
+            }
+        }
+    }
+
+    private func generateAndSetGOSTKey() {
+        feedbackMessage = "Генерация ГОСТ ключа (256-бит)..."
+        isProcessing = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let keyHex = gostWrapper.generateGOSTKeyHex()
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                if keyHex.starts(with: "Error:") {
+                    self.feedbackMessage = keyHex
+                    self.gostKeyHex = ""
+                } else {
+                    self.gostKeyHex = keyHex
+                    self.feedbackMessage = "ГОСТ ключ сгенерирован. "
+                }
+                self.updateFeedbackForAlgorithmChange()
+            }
+        }
+    }
+
+    private func generateAndSetGOSTIv() {
+        feedbackMessage = "Генерация ГОСТ IV (64-бит)..."
+        isProcessing = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ivHex = gostWrapper.generateGOSTIvHex()
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                if ivHex.starts(with: "Error:") {
+                    self.feedbackMessage = ivHex
+                    self.gostInitialIvHex = ""
+                } else {
+                    self.gostInitialIvHex = ivHex
+                    self.feedbackMessage = "ГОСТ IV сгенерирован. "
+                }
+                self.updateFeedbackForAlgorithmChange()
             }
         }
     }
@@ -470,7 +545,15 @@ struct FileTransferAndEncryptView: View {
         let tempDirectoryURL = FileManager.default.temporaryDirectory
         let uniqueFilenamePart = UUID().uuidString
         let originalFilename = originalURL.deletingPathExtension().lastPathComponent
-        let pathExtension = originalURL.pathExtension
+        var pathExtension = originalURL.pathExtension
+        
+        if operation == "encrypted_rsa" && pathExtension.isEmpty {
+            pathExtension = "enc"
+        } else if operation == "encrypted_gost" && pathExtension.isEmpty {
+             pathExtension = "gst"
+        }
+
+
         let tempFilename = "\(originalFilename)_\(operation)_\(uniqueFilenamePart).\(pathExtension)"
         return tempDirectoryURL.appendingPathComponent(tempFilename)
     }
@@ -482,13 +565,13 @@ struct FileTransferAndEncryptView: View {
         }
         
         cleanupTemporaryFile()
-        let temporaryDestinationURL = createTemporaryURL(for: currentSourceURL, operation: "encrypted")
+        let tempOpName = selectedAlgorithm == .rsa ? "encrypted_rsa" : (selectedAlgorithm == .gost ? "encrypted_gost" : "encrypted_static")
+        let temporaryDestinationURL = createTemporaryURL(for: currentSourceURL, operation: tempOpName)
         
         self.feedbackMessage = "Шифрование файла '\(currentSourceURL.lastPathComponent)'..."
         self.isProcessing = true
         
         DispatchQueue.global(qos: .userInitiated).async {
-            var success = false
             var operationResultMessage: String = ""
 
             switch self.selectedAlgorithm {
@@ -500,15 +583,13 @@ struct FileTransferAndEncryptView: View {
                     eHex: self.rsaEKey
                 )
             case .gost:
-                do {
-                    var data = try Data(contentsOf: currentSourceURL)
-                    let prefix = "GOST_ENCRYPTED_KEY(\(self.rsaDKey.count)):\n".data(using: .utf8)!
-                    data = prefix + data
-                    try data.write(to: temporaryDestinationURL)
-                    operationResultMessage = "Файл успешно зашифрован ГОСТ (имитация)."
-                } catch {
-                    operationResultMessage = "Error: Ошибка ГОСТ (имитация) шифрования - \(error.localizedDescription)"
-                }
+                let ivToUse: String? = self.gostInitialIvHex.isEmpty ? nil : self.gostInitialIvHex
+                operationResultMessage = self.gostWrapper.encryptFileGOST(
+                    currentSourceURL.path,
+                    toOutputFile: temporaryDestinationURL.path,
+                    keyHex: self.gostKeyHex,
+                    initialIvHex: ivToUse
+                )
             case .staticEncrypt:
                 do {
                     var data = try Data(contentsOf: currentSourceURL)
@@ -520,7 +601,7 @@ struct FileTransferAndEncryptView: View {
                 }
             }
             
-            success = !operationResultMessage.starts(with: "Error:")
+            let success = !operationResultMessage.lowercased().starts(with: "error:")
             
             DispatchQueue.main.async {
                 self.isProcessing = false
@@ -528,7 +609,7 @@ struct FileTransferAndEncryptView: View {
                 if success {
                     self.outputProcessedURL = temporaryDestinationURL
                 }
-                currentSourceURL.stopAccessingSecurityScopedResource()
+                 currentSourceURL.stopAccessingSecurityScopedResourceIfNeeded()
             }
         }
     }
@@ -540,13 +621,13 @@ struct FileTransferAndEncryptView: View {
         }
         
         cleanupTemporaryFile()
-        let temporaryDestinationURL = createTemporaryURL(for: currentSourceURL, operation: "decrypted")
+        let tempOpName = selectedAlgorithm == .rsa ? "decrypted_rsa" : (selectedAlgorithm == .gost ? "decrypted_gost" : "decrypted_static")
+        let temporaryDestinationURL = createTemporaryURL(for: currentSourceURL, operation: tempOpName)
 
         self.feedbackMessage = "Расшифрование файла '\(currentSourceURL.lastPathComponent)'..."
         self.isProcessing = true
         
         DispatchQueue.global(qos: .userInitiated).async {
-            var success = false
             var operationResultMessage: String = ""
 
             switch self.selectedAlgorithm {
@@ -558,18 +639,11 @@ struct FileTransferAndEncryptView: View {
                     dHex: self.rsaDKey
                 )
             case .gost:
-                do {
-                    var data = try Data(contentsOf: currentSourceURL)
-                    let prefixString = "GOST_ENCRYPTED_KEY(\(self.rsaDKey.count)):\n"
-                    let prefixData = prefixString.data(using: .utf8)!
-                    if data.starts(with: prefixData) {
-                        data.removeFirst(prefixData.count)
-                    }
-                    try data.write(to: temporaryDestinationURL)
-                    operationResultMessage = "Файл успешно расшифрован ГОСТ (имитация)."
-                } catch {
-                    operationResultMessage = "Error: Ошибка ГОСТ (имитация) расшифрования - \(error.localizedDescription)"
-                }
+                operationResultMessage = self.gostWrapper.decryptFileGOST(
+                    currentSourceURL.path,
+                    toOutputFile: temporaryDestinationURL.path,
+                    keyHex: self.gostKeyHex
+                )
             case .staticEncrypt:
                 do {
                     var data = try Data(contentsOf: currentSourceURL)
@@ -581,7 +655,7 @@ struct FileTransferAndEncryptView: View {
                 }
             }
             
-            success = !operationResultMessage.starts(with: "Error:")
+            let success = !operationResultMessage.lowercased().starts(with: "error:")
 
             DispatchQueue.main.async {
                 self.isProcessing = false
@@ -589,7 +663,7 @@ struct FileTransferAndEncryptView: View {
                 if success {
                     self.outputProcessedURL = temporaryDestinationURL
                 }
-                currentSourceURL.stopAccessingSecurityScopedResource()
+                currentSourceURL.stopAccessingSecurityScopedResourceIfNeeded()
             }
         }
     }
@@ -603,11 +677,14 @@ struct FileTransferAndEncryptView: View {
         let savePanel = NSSavePanel()
         savePanel.canCreateDirectories = true
         
-        let originalFileNameWithoutOp = processedFileURL.lastPathComponent
-            .replacingOccurrences(of: "_encrypted_\(processedFileURL.deletingPathExtension().lastPathComponent.components(separatedBy: "_").last ?? "")", with: "")
-            .replacingOccurrences(of: "_decrypted_\(processedFileURL.deletingPathExtension().lastPathComponent.components(separatedBy: "_").last ?? "")", with: "")
+        let fileNameParts = processedFileURL.deletingPathExtension().lastPathComponent.components(separatedBy: "_")
+        var suggestedName = processedFileURL.lastPathComponent
+        if fileNameParts.count > 2 { // originalName_operation_uuid
+            let originalName = fileNameParts.dropLast(2).joined(separator: "_")
+            suggestedName = originalName + "." + processedFileURL.pathExtension
+        }
         
-        savePanel.nameFieldStringValue = originalFileNameWithoutOp
+        savePanel.nameFieldStringValue = suggestedName
 
 
         savePanel.begin { response in
@@ -625,6 +702,7 @@ struct FileTransferAndEncryptView: View {
                                 self.isProcessing = false
                                 self.feedbackMessage = "Файл успешно сохранен: \(userChosenURL.lastPathComponent)"
                                 self.cleanupTemporaryFile()
+                                self.updateFeedbackForAlgorithmChange()
                             }
                         } else {
                             DispatchQueue.main.async {
@@ -646,6 +724,18 @@ struct FileTransferAndEncryptView: View {
     }
 }
 
+extension URL {
+    func stopAccessingSecurityScopedResourceIfNeeded() {
+        // For sandboxed apps, you might need to stop accessing security-scoped resources.
+        // This is a placeholder; actual implementation depends on how access was started.
+        // If you used `startAccessingSecurityScopedResource()`, you should balance it with `stopAccessingSecurityScopedResource()`.
+        // However, for file drops and NSOpenPanel, the system often manages this.
+        // If this URL was obtained via startAccessingSecurityScopedResource, uncomment:
+        // self.stopAccessingSecurityScopedResource()
+    }
+}
+
+
 extension View {
     @ViewBuilder
     func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
@@ -662,3 +752,4 @@ struct FileTransferAndEncryptView_Previews: PreviewProvider {
         FileTransferAndEncryptView()
     }
 }
+
